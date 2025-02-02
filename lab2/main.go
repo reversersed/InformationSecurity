@@ -2,7 +2,11 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"os"
+	"path"
+	"strings"
 )
 
 const (
@@ -62,7 +66,7 @@ func decodeBase64(data string) ([]byte, error) {
 
 		value, exists := charMap[char]
 		if !exists {
-			return nil, errors.New("invalid base64 character")
+			return nil, errors.New("найден неверный для base64 символ")
 		}
 
 		buffer = (buffer << 6) | value
@@ -86,22 +90,47 @@ func decodeBase64(data string) ([]byte, error) {
 			result = append(result, byte((buffer>>16)&0xFF))
 			result = append(result, byte((buffer>>8)&0xFF))
 		} else {
-			return nil, errors.New("invalid base64 length")
+			return nil, errors.New("неправильная длина base64 кода")
 		}
 	}
 
 	return result, nil
 }
 
-func main() {
-	data := []byte("Hello, World!")
-	encoded := encodeBase64(data)
-	fmt.Println("Encoded:", encoded)
+var (
+	file = flag.String("file", "", "Абсолютный или относительный путь к файлу")
+)
 
-	decoded, err := decodeBase64(encoded)
-	if err != nil {
-		fmt.Println("Error decoding:", err)
+func main() {
+	flag.Parse()
+	if len(*file) == 0 {
+		flag.PrintDefaults()
 		return
 	}
-	fmt.Println("Decoded:", string(decoded))
+
+	bytes, err := os.ReadFile(*file)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Декодирование " + strings.Split((*file), "\\")[len(strings.Split((*file), "\\"))-1] + "...")
+	decoded, err := decodeBase64(string(bytes))
+	if err != nil {
+		fmt.Println("Невозможно декодировать файл. Применяется кодирование...")
+		encoded := encodeBase64(bytes)
+		newFilePath := strings.Split(path.Base(*file), ".")[0] + " enc." + strings.Split(path.Base(*file), ".")[len(strings.Split(path.Base(*file), "."))-1]
+		os.Remove(newFilePath)
+
+		if err := os.WriteFile(newFilePath, []byte(encoded), os.ModePerm); err != nil {
+			panic(err)
+		}
+		fmt.Println("Файл закодирован и сохранен как " + strings.Split((newFilePath), "\\")[len(strings.Split((newFilePath), "\\"))-1])
+		return
+	}
+	newFilePath := strings.Split(path.Base(*file), ".")[0] + " dec." + strings.Split(path.Base(*file), ".")[len(strings.Split(path.Base(*file), "."))-1]
+	os.Remove(newFilePath)
+	if err := os.WriteFile(newFilePath, decoded, os.ModeExclusive); err != nil {
+		panic(err)
+	}
+	fmt.Println("Файл декодирован и сохранен как " + strings.Split((newFilePath), "\\")[len(strings.Split((newFilePath), "\\"))-1])
 }
