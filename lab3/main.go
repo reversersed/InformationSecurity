@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -29,7 +30,7 @@ type gammaMode struct {
 
 func NewCipher(key []byte, sbox [8][16]byte) (*gostCipher, error) {
 	if len(key) != 32 {
-		return nil, errors.New("gost28147: invalid key size")
+		return nil, errors.New("gost28147: invalid key size: " + strconv.Itoa(len(key)))
 	}
 
 	c := new(gostCipher)
@@ -133,11 +134,11 @@ func DecryptWithSync(cipher *gostCipher, ciphertext []byte) ([]byte, error) {
 
 var (
 	file = flag.String("file", "", "Абсолютный или относительный путь к файлу")
-	enc  = flag.Bool("enc", false, "Включить режим кодирования")
+	dec  = flag.Bool("dec", false, "Включить режим декодирования")
 )
 
 func main() {
-	key := make([]byte, 32)
+	key := []byte{255, 126, 235, 54, 45, 27, 15, 69, 228, 14, 88, 148, 8, 91, 99, 42, 52, 54, 12, 65, 24, 55, 127, 246, 126, 109, 195, 121, 12, 5, 0, 8}
 	S := [BlockSize]byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}
 
 	sbox := [8][16]byte{
@@ -167,7 +168,7 @@ func main() {
 		panic(err)
 	}
 
-	if *enc {
+	if !*dec {
 		fmt.Println("Кодирование " + strings.Split((*file), "\\")[len(strings.Split((*file), "\\"))-1] + "...")
 		encoded := EncryptWithSync(cipher, bytes, S)
 		newFilePath := strings.Split(path.Base(*file), ".")[0] + " enc." + strings.Split(path.Base(*file), ".")[len(strings.Split(path.Base(*file), "."))-1]
