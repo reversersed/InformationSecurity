@@ -167,7 +167,6 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("Ключ шифрования: %v\n", key)
 	if *enc {
 		fmt.Println("Кодирование " + strings.Split((*file), "\\")[len(strings.Split((*file), "\\"))-1] + "...")
 		encoded := EncryptWithSync(cipher, bytes, S)
