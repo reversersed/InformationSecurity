@@ -11,21 +11,15 @@ import (
 	"strings"
 )
 
-const BlockSize = 8
-
 const (
-	C1 = 0x01010104
-	C2 = 0x01010101
+	BlockSize = 8
+	C1        = 0x01010104
+	C2        = 0x01010101
 )
 
 type gostCipher struct {
 	key  [32]byte
 	sbox [8][16]byte
-}
-
-type gammaMode struct {
-	cipher *gostCipher
-	Y, Z   uint32
 }
 
 func NewCipher(key []byte, sbox [8][16]byte) (*gostCipher, error) {
@@ -39,97 +33,63 @@ func NewCipher(key []byte, sbox [8][16]byte) (*gostCipher, error) {
 
 	return c, nil
 }
+func (c *gostCipher) encryptBlock(block [BlockSize]byte, subkey uint32) [BlockSize]byte {
+	left := binary.LittleEndian.Uint32(block[:4])
+	right := binary.LittleEndian.Uint32(block[4:])
 
-func (c *gostCipher) Encrypt(dst, src []byte) {
-	var block [BlockSize]byte
-	copy(block[:], src)
+	rightWithKey := right + subkey
 
-	for i := 0; i < 32; i++ {
-		keyPart := c.key[i%8]
-		block = c.round(block, keyPart)
+	var sboxResult uint32
+	for i := 0; i < 4; i++ {
+		byteVal := byte(rightWithKey >> (8 * i))
+		sboxResult |= uint32(c.sbox[i][byteVal&0x0F]) << (8 * i)
 	}
 
-	copy(dst, block[:])
-}
+	sboxResult = (sboxResult << 11) | (sboxResult >> (32 - 11))
 
-func (c *gostCipher) round(block [BlockSize]byte, key byte) [BlockSize]byte {
+	newRight := left ^ sboxResult
+
+	left = right
+	right = newRight
+
 	var result [BlockSize]byte
-	for i := 0; i < BlockSize; i++ {
-		result[i] = c.sbox[i][(block[i]^key)&0x0F]
-	}
-	val := binary.LittleEndian.Uint64(result[:])
-	val = (val << 11) | (val >> (64 - 11))
-	binary.LittleEndian.PutUint64(result[:], val)
+	binary.LittleEndian.PutUint32(result[:4], left)
+	binary.LittleEndian.PutUint32(result[4:], right)
+
 	return result
 }
 
-func NewGammaMode(c *gostCipher, S [BlockSize]byte) *gammaMode {
-	g := new(gammaMode)
-	g.cipher = c
+func (c *gostCipher) EncryptGamma(plaintext []byte, S [BlockSize]byte) []byte {
+	Y := binary.LittleEndian.Uint32(S[:4])
+	Z := binary.LittleEndian.Uint32(S[4:])
+	var gamma [BlockSize]byte
 
-	g.Y = binary.LittleEndian.Uint32(S[:4])
-	g.Z = binary.LittleEndian.Uint32(S[4:])
+	ciphertext := make([]byte, len(plaintext))
+	for i := 0; i < len(plaintext); i += BlockSize {
+		gamma, Y, Z = c.generateGamma(Y, Z)
 
-	return g
-}
-
-func addModulo(a, b uint32) uint32 {
-	res := a + b
-	if res < a || res < b {
-		res++
-	}
-	return res
-}
-
-func (g *gammaMode) Crypt(dst, src []byte) {
-	for i := 0; i < len(src); i += BlockSize {
-		gamma := g.generateGamma()
-
-		for j := 0; j < BlockSize && i+j < len(src); j++ {
-			dst[i+j] = src[i+j] ^ gamma[j]
+		for j := 0; j < BlockSize && i+j < len(plaintext); j++ {
+			ciphertext[i+j] = plaintext[i+j] ^ gamma[j]
 		}
 	}
-}
-
-func (g *gammaMode) generateGamma() [BlockSize]byte {
-	Yj := addModulo(g.Y, C2)
-	Zj := addModulo(g.Z, C1)
-
-	var gamma [BlockSize]byte
-	binary.LittleEndian.PutUint32(gamma[:4], Yj)
-	binary.LittleEndian.PutUint32(gamma[4:], Zj)
-	g.cipher.Encrypt(gamma[:], gamma[:])
-
-	g.Y = Yj
-	g.Z = Zj
-
-	return gamma
-}
-
-func EncryptWithSync(cipher *gostCipher, plaintext []byte, S [BlockSize]byte) []byte {
-	ciphertext := make([]byte, BlockSize+len(plaintext))
-
-	copy(ciphertext[:BlockSize], S[:])
-
-	gmode := NewGammaMode(cipher, S)
-	gmode.Crypt(ciphertext[BlockSize:], plaintext)
 
 	return ciphertext
 }
 
-func DecryptWithSync(cipher *gostCipher, ciphertext []byte) ([]byte, error) {
-	if len(ciphertext) < BlockSize {
-		return nil, errors.New("ciphertext too short")
-	}
+func (c *gostCipher) generateGamma(Y, Z uint32) ([BlockSize]byte, uint32, uint32) {
+	Yj := Y + C2
+	Zj := (Z+C1-1)%(1<<32-1) + 1
 
-	S := [BlockSize]byte{}
-	copy(S[:], ciphertext[:BlockSize])
+	var gamma [BlockSize]byte
+	binary.LittleEndian.PutUint32(gamma[:4], Yj)
+	binary.LittleEndian.PutUint32(gamma[4:], Zj)
+	gamma = c.encryptBlock(gamma, 0)
 
-	plaintext := make([]byte, len(ciphertext)-BlockSize)
-	gmode := NewGammaMode(cipher, S)
-	gmode.Crypt(plaintext, ciphertext[BlockSize:])
+	return gamma, Yj, Zj
+}
 
-	return plaintext, nil
+func (c *gostCipher) DecryptGamma(ciphertext []byte, S [BlockSize]byte) []byte {
+	return c.EncryptGamma(ciphertext, S)
 }
 
 var (
@@ -170,7 +130,7 @@ func main() {
 
 	if !*dec {
 		fmt.Println("Кодирование " + strings.Split((*file), "\\")[len(strings.Split((*file), "\\"))-1] + "...")
-		encoded := EncryptWithSync(cipher, bytes, S)
+		encoded := cipher.EncryptGamma(bytes, S)
 		newFilePath := strings.Split(path.Base(*file), ".")[0] + " enc." + strings.Split(path.Base(*file), ".")[len(strings.Split(path.Base(*file), "."))-1]
 		os.Remove(newFilePath)
 
@@ -180,10 +140,8 @@ func main() {
 		fmt.Println("Файл закодирован и сохранен как " + strings.Split((newFilePath), "\\")[len(strings.Split((newFilePath), "\\"))-1])
 	} else {
 		fmt.Println("Декодирование " + strings.Split((*file), "\\")[len(strings.Split((*file), "\\"))-1] + "...")
-		decrypted, err := DecryptWithSync(cipher, bytes)
-		if err != nil {
-			panic(err)
-		}
+		decrypted := cipher.DecryptGamma(bytes, S)
+
 		newFilePath := strings.Split(path.Base(*file), ".")[0] + " dec." + strings.Split(path.Base(*file), ".")[len(strings.Split(path.Base(*file), "."))-1]
 		os.Remove(newFilePath)
 		if err := os.WriteFile(newFilePath, decrypted, os.ModeExclusive); err != nil {
