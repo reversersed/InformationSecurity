@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 )
@@ -49,10 +48,14 @@ var (
 type GOST struct {
 }
 
+func NewGost() *GOST {
+	return new(GOST)
+}
+
 func (g *GOST) sBlock(data []byte) []byte {
 	result := make([]byte, len(data))
 	for i, b := range data {
-		result[i] = pi[b] // Заменяем каждый байт по таблице подстановки π
+		result[i] = pi[b]
 	}
 	return result
 }
@@ -60,53 +63,52 @@ func (g *GOST) sBlock(data []byte) []byte {
 func (g *GOST) pBlock(data []byte) []byte {
 	result := make([]byte, blockSize)
 	for i := 0; i < blockSize; i++ {
-		result[i] = data[tau[i]] // Переставляем байты согласно τ
+		result[i] = data[tau[i]]
 	}
 	return result
 }
 
-func (g *GOST) lBlock(a uint64) uint64 {
-	var result uint64
-	for i := 0; i < 64; i++ {
-		// Если i-й бит a равен 1, добавляем соответствующую строку матрицы A
-		if (a>>i)&1 == 1 {
-			result ^= matrixA[i]
+func (g *GOST) lBlock(data []byte) []byte {
+	result := make([]byte, blockSize)
+	for i := 0; i < 8; i++ {
+		chunk := binary.LittleEndian.Uint64(data[i*8 : (i+1)*8])
+		var transformed uint64
+		for j := 0; j < 64; j++ {
+			if (chunk>>j)&1 == 1 {
+				transformed ^= matrixA[j]
+			}
 		}
+		binary.LittleEndian.PutUint64(result[i*8:(i+1)*8], transformed)
 	}
 	return result
 }
 
-func (g *GOST) xBlock(key, data []byte) []byte {
+func (g *GOST) xBlock(a, b []byte) []byte {
 	result := make([]byte, blockSize)
 	for i := 0; i < blockSize; i++ {
-
-		result[i] = key[i] ^ data[i]
+		result[i] = a[i] ^ b[i]
 	}
 	return result
 }
 
 func (g *GOST) F(h, N []byte) []byte {
-	data := g.xBlock(N, h)
+	data := g.xBlock(h, N)
 	data = g.sBlock(data)
 	data = g.pBlock(data)
-	binary.LittleEndian.PutUint64(data, g.lBlock(binary.LittleEndian.Uint64(data)))
+	data = g.lBlock(data)
 	return data
 }
-func (g *GOST) TransferToBytes(a [8]int) []byte {
-	var num uint64
-	for i := 0; i < len(a); i++ {
-		num = (num << 8) | uint64(a[i])
-	}
-	data := make([]byte, 64)
-	binary.LittleEndian.PutUint64(data, num)
-	return data
-}
+
 func (g *GOST) E(K, m []byte) []byte {
 	keys := make([][]byte, 13)
 	keys[0] = K
 
 	for i := 1; i < 13; i++ {
-		keys[i] = g.F(keys[i-1], g.TransferToBytes(C[i-1]))
+		var c int64
+		for _, v := range C[i-1] {
+			c = (c << 8) | int64(v)
+		}
+		keys[i] = g.F(keys[i-1], g.intToVec512(big.NewInt(c)))
 	}
 
 	data := m
@@ -114,21 +116,15 @@ func (g *GOST) E(K, m []byte) []byte {
 		data = g.xBlock(keys[i], data)
 		data = g.sBlock(data)
 		data = g.pBlock(data)
-		binary.LittleEndian.PutUint64(data, g.lBlock(binary.LittleEndian.Uint64(data)))
+		data = g.lBlock(data)
 	}
 	return data
 }
 
 func (g *GOST) g(h, m, N []byte) []byte {
 	K := g.F(h, N)
-
 	eKm := g.E(K, m)
-
-	result := make([]byte, blockSize)
-	for i := 0; i < blockSize; i++ {
-		result[i] = eKm[i] ^ h[i] ^ m[i]
-	}
-	return result
+	return g.xBlock(g.xBlock(eKm, h), m)
 }
 
 func (g *GOST) intToVec512(n *big.Int) []byte {
@@ -150,68 +146,50 @@ func (g *GOST) addMod512(a, b []byte) []byte {
 	return g.intToVec512(sum)
 }
 
-func NewGost() *GOST {
-	return new(GOST)
-}
-
 func (g *GOST) padLastBlock(M []byte) []byte {
 	messageBitLength := uint64(len(M)) * 8
-
 	zeroPaddingLength := (blockSize - (len(M)+1)%blockSize) % blockSize
 	if zeroPaddingLength < 8 {
 		zeroPaddingLength += blockSize
 	}
 
 	paddedBlock := make([]byte, len(M)+1+zeroPaddingLength+8)
-
 	copy(paddedBlock, M)
-
 	paddedBlock[len(M)] = 0x80
 
-	for i := len(M) + 1; i < len(M)+1+zeroPaddingLength; i++ {
-		paddedBlock[i] = 0x00
-	}
-
-	binary.BigEndian.PutUint64(paddedBlock[len(paddedBlock)-8:], messageBitLength)
-
+	binary.LittleEndian.PutUint64(paddedBlock[len(paddedBlock)-8:], messageBitLength)
 	return paddedBlock
 }
 
 func (g *GOST) Sum(M []byte) []byte {
-	var h, N, Sigma []byte
-
-	h = make([]byte, blockSize)
-	N = make([]byte, blockSize)
-	Sigma = make([]byte, blockSize)
+	h := make([]byte, blockSize)
+	N := make([]byte, blockSize)
+	Sigma := make([]byte, blockSize)
 
 	for len(M) >= blockSize {
 		m := M[len(M)-blockSize:]
 		M = M[:len(M)-blockSize]
 
 		h = g.g(h, m, N)
-
 		N = g.addMod512(N, g.intToVec512(big.NewInt(512)))
-
 		Sigma = g.addMod512(Sigma, m)
 	}
 
 	if len(M) > 0 {
 		paddedM := g.padLastBlock(M)
-
 		h = g.g(h, paddedM, N)
-
 		N = g.addMod512(N, g.intToVec512(big.NewInt(int64(len(M)*8))))
-
 		Sigma = g.addMod512(Sigma, paddedM)
 	}
+
+	h = g.g(h, N, make([]byte, blockSize))
+	h = g.g(h, Sigma, make([]byte, blockSize))
 
 	return h
 }
 
 func main() {
 	gost := NewGost()
-
 	sum := gost.Sum([]byte("323130393837363534333231303938373635343332313039383736353433323130393837363534333231303938373635343332313039383736353433323130"))
-	hex := hex.EncodeToString(sum)
-	fmt.Printf("%d %s\n", len(hex), hex)
+	fmt.Printf("%x\n", sum)
 }
